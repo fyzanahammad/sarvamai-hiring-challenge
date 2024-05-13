@@ -1,4 +1,7 @@
-youtube-dl==2021.12.17
+# youtube-dl
+# yt-dlp
+pytube
+youtube-transcript-api
 moviepy==1.0.3
 torch==1.12.0  # Assuming PyTorch-based models like Wav2Vec
 transformers==4.18.0  # For Hugging Face's transformers (if using Wav2Vec)
