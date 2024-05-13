@@ -1,1 +1,12 @@
-
+youtube-dl==2021.12.17
+moviepy==1.0.3
+torch==1.12.0  # Assuming PyTorch-based models like Wav2Vec
+transformers==4.18.0  # For Hugging Face's transformers (if using Wav2Vec)
+pandas==1.4.2
+numpy==1.22.3
+scipy==1.7.3
+librosa==0.9.1  # For audio processing
+soundfile==0.10.3.post1
+nltk==3.7
+spacy==3.3.0
+gradio==3.1.4  # For creating a Gradio interface
