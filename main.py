@@ -5,6 +5,12 @@ import subprocess
 from pytube import YouTube
 import torch
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+from transformers import BertModel, BertTokenizer
+import re
+
+# Load pre-trained model and tokenizer for semantic similarity
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+model = BertModel.from_pretrained('bert-base-uncased')
 
 def get_video_id_from_url(url):
     if "youtube.com/watch?v=" in url:
@@ -13,107 +19,34 @@ def get_video_id_from_url(url):
         raise ValueError("Invalid YouTube URL")
 
 def rename_audio(file_path):
-    # Define the new file name
     new_file_name = "audio_file"
-
-    # Get the directory of the file
     file_directory = os.path.dirname(file_path)
-
-    # Get the file extension
     file_extension = os.path.splitext(file_path)[1]
-
-    # Create a unique new file name
     count = 1
     while os.path.exists(os.path.join(file_directory, f"{new_file_name}_{count}{file_extension}")):
         count += 1
-
     new_file_name = f"{new_file_name}_{count}{file_extension}"
-    # Get the new file path
     new_file_path = os.path.join(file_directory, new_file_name)
-
-    # Rename the file
     os.rename(file_path, new_file_path)
-
-    print(f"Renamed '{file_path}' to '{new_file_path}'")
-
     return new_file_path
 
-def convert_to_wav(file_path):
-    # Define output directory
+def convert_to_wav(file_path, status_text):
+    status_text.text("Converting audio to WAV format...")
     output_directory = os.path.dirname(file_path)
-
-    # Define the new file name with .wav extension
     wav_file_name = os.path.splitext(os.path.basename(file_path))[0] + ".wav"
-
-    # Define the output path for the converted .wav file
     wav_file_path = os.path.join(output_directory, wav_file_name)
-
-    # Execute FFmpeg command to convert to .wav format
     subprocess.run(["ffmpeg", "-i", file_path, "-acodec", "pcm_s16le", "-ar", "44100", wav_file_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
     return wav_file_path
 
-def download_audio(youtube_url):
-    # Create a YouTube object with the URL
+def download_audio(youtube_url, progress_bar, status_text):
+    status_text.text("Downloading audio from YouTube...")
     yt = YouTube(youtube_url)
-
-    # Define output directory
     output_path = "downloaded_audio"
-
-    # Get the best audio stream
     audio_stream = yt.streams.get_audio_only()
-
-    # Download the audio stream
     downloaded_file_path = audio_stream.download(output_path)
-
-    # Rename the downloaded audio file
     renamed_file_path = rename_audio(downloaded_file_path)
-
-    print(f"Downloaded '{audio_stream.title}' to '{renamed_file_path}' as '{audio_stream.mime_type}'.")
-
-    # Convert to .wav format
-    wav_file_path = convert_to_wav(renamed_file_path)
-
-    print(f"Converted '{renamed_file_path}' to '{wav_file_path}'.")
-
-    return wav_file_path
-
-def transcribe_audio(wav_file_path):
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-
-    model_id = "openai/whisper-tiny"
-
-    model = AutoModelForSpeechSeq2Seq.from_pretrained(
-        model_id, torch_dtype=torch_dtype, low_cpu_mem_usage=True, use_safetensors=True
-    )
-    model.to(device)
-
-    processor = AutoProcessor.from_pretrained(model_id)
-
-    pipe = pipeline(
-        "automatic-speech-recognition",
-        model=model,
-        tokenizer=processor.tokenizer,
-        feature_extractor=processor.feature_extractor,
-        max_new_tokens=128,
-        chunk_length_s=30,
-        batch_size=16,
-        return_timestamps=True,
-        torch_dtype=torch_dtype,
-        device=device,
-    )
-
-    result = pipe(wav_file_path, return_timestamps=True)
-    return result["chunks"]
-
-from transformers import BertModel, BertTokenizer
-import torch
-import re
-
-# Load pre-trained model and tokenizer
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-model = BertModel.from_pretrained('bert-base-uncased')
+    progress_bar.progress(0.2)
+    return convert_to_wav(renamed_file_path, status_text)
 
 def get_sentence_embedding(sentence):
     inputs = tokenizer(sentence, return_tensors='pt')
@@ -126,17 +59,16 @@ def calculate_similarity(sentence1, sentence2):
     cosine_similarity = torch.nn.functional.cosine_similarity(embedding1, embedding2)
     return cosine_similarity.item()
 
-def adjust_timestamps(transcription_data, similarity_threshold=0.85):
+def adjust_timestamps(transcription_data, similarity_threshold=0.85, progress_bar=None, status_text=None):
     new_chunks = []
     buffer_sentence = ""
     buffer_start_time = None
     buffer_end_time = None
 
-    for entry in transcription_data:
+    total_chunks = len(transcription_data)
+    for idx, entry in enumerate(transcription_data):
         start_time, end_time = entry['timestamp']
         text = entry['text']
-
-        # Split text based only on full stops (periods)
         sentences = re.split(r'(?<=\.)\s+', text)
 
         for sentence in sentences:
@@ -158,6 +90,11 @@ def adjust_timestamps(transcription_data, similarity_threshold=0.85):
                     buffer_start_time = start_time
                     buffer_end_time = end_time
 
+        if progress_bar:
+            progress_bar.progress(0.6 + 0.4 * (idx + 1) / total_chunks)
+        if status_text:
+            status_text.text(f"Processing transcription data... ({idx + 1}/{total_chunks})")
+
     if buffer_sentence:
         new_chunks.append({
             'timestamp': (buffer_start_time, buffer_end_time),
@@ -166,7 +103,34 @@ def adjust_timestamps(transcription_data, similarity_threshold=0.85):
 
     return new_chunks
 
-# Example usage within the main function
+def transcribe_audio(wav_file_path, progress_bar, status_text):
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    model_id = "openai/whisper-tiny"
+
+    status_text.text("Loading transcription model...")
+    model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=torch_dtype, low_cpu_mem_usage=True, use_safetensors=True)
+    model.to(device)
+    processor = AutoProcessor.from_pretrained(model_id)
+
+    pipe = pipeline(
+        "automatic-speech-recognition",
+        model=model,
+        tokenizer=processor.tokenizer,
+        feature_extractor=processor.feature_extractor,
+        max_new_tokens=128,
+        chunk_length_s=30,
+        batch_size=16,
+        return_timestamps=True,
+        torch_dtype=torch_dtype,
+        device=device,
+    )
+
+    status_text.text("Transcribing audio...")
+    result = pipe(wav_file_path, return_timestamps=True)
+    progress_bar.progress(0.6)
+    return result["chunks"]
+
 def main():
     st.title("YouTube Transcription App")
 
@@ -174,11 +138,14 @@ def main():
 
     if youtube_url:
         try:
+            progress_bar = st.progress(0)
+            status_text = st.empty()
             video_id = get_video_id_from_url(youtube_url)
-            wav_file_path = download_audio(youtube_url)
-            transcription_data = transcribe_audio(wav_file_path)
-
-            adjusted_transcription_data = adjust_timestamps(transcription_data)
+            wav_file_path = download_audio(youtube_url, progress_bar, status_text)
+            transcription_data = transcribe_audio(wav_file_path, progress_bar, status_text)
+            adjusted_transcription_data = adjust_timestamps(transcription_data, progress_bar=progress_bar, status_text=status_text)
+            progress_bar.progress(1.0)
+            status_text.text("Transcription and processing complete.")
 
             st.subheader("Transcription")
             for entry in adjusted_transcription_data:
@@ -191,4 +158,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
